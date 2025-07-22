@@ -31,16 +31,15 @@ def hash_email(email: str) -> str:
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY")
 
-# DB connection string
-conn_str = mysql.connector.connect(
+# DB connection
+conn = mysql.connector.connect(
     host=os.getenv("DB_SERVER"),
     port=int(os.getenv("DB_PORT")),
     database=os.getenv("DB_NAME"),
     user=os.getenv("DB_USER"),
     password=os.getenv("DB_PASSWORD")
 )
-
-cursor = conn_str.cursor()
+cursor = conn.cursor()
 
 # Create tables if not exist
 cursor.execute("""
@@ -50,12 +49,11 @@ CREATE TABLE IF NOT EXISTS pastes (
     content TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME,
-    views_left INT NULL DEFAULT NULL,
+    views_left INT DEFAULT NULL,
     language VARCHAR(50) DEFAULT 'text'
 );
 """)
-
-conn_str.commit()
+conn.commit()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS paste_viewers (
@@ -69,7 +67,7 @@ CREATE TABLE IF NOT EXISTS paste_viewers (
     FOREIGN KEY (paste_id) REFERENCES pastes(paste_id) ON DELETE CASCADE
 );
 """)
-conn_str.commit()
+conn.commit()
 
 def generate_code(length=6):
     return ''.join(random.choices(string.digits, k=length))
@@ -110,15 +108,14 @@ Thanks!
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-    conn_str = mysql.connector.connect(
+    conn = mysql.connector.connect(
         host=os.getenv("DB_SERVER"),
         port=int(os.getenv("DB_PORT")),
         database=os.getenv("DB_NAME"),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD")
     )
-
-    cursor = conn_str.cursor()
+    cursor = conn.cursor()
 
     if request.method == "POST":
         text = request.form["paste"]
@@ -141,9 +138,9 @@ def home():
 
         cursor.execute("""
             INSERT INTO pastes (paste_id, content, expires_at, views_left, language)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
         """, (paste_id, encrypted_content, expires_at, views_left, language))
-        conn_str.commit()
+        conn.commit()
 
         emails_raw = request.form.get("emails", "").strip()
         emails = [e.strip() for e in emails_raw.split(",") if e.strip()]
@@ -152,9 +149,9 @@ def home():
             encrypted_email = fernet.encrypt(email.encode()).decode()
             cursor.execute("""
                 INSERT INTO paste_viewers (paste_id, email, email_hash)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
             """, (paste_id, encrypted_email, email_hash))
-            conn_str.commit()
+            conn.commit()
 
         cursor.close()
         paste_url = request.host_url.rstrip("/") + f"/p/{paste_id}"
@@ -165,17 +162,16 @@ def home():
 
 @app.route("/p/<paste_id>", methods=["GET", "POST"])
 def view_paste(paste_id):
-    conn_str = mysql.connector.connect(
+    conn = mysql.connector.connect(
         host=os.getenv("DB_SERVER"),
         port=int(os.getenv("DB_PORT")),
         database=os.getenv("DB_NAME"),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD")
     )
+    cursor = conn.cursor()
 
-    cursor = conn_str.cursor()
-
-    cursor.execute("SELECT id, content, expires_at, views_left, language FROM pastes WHERE paste_id = ?", paste_id)
+    cursor.execute("SELECT id, content, expires_at, views_left, language FROM pastes WHERE paste_id = %s", (paste_id,))
     paste = cursor.fetchone()
     if not paste:
         return "Paste not found", 404
@@ -183,16 +179,16 @@ def view_paste(paste_id):
     paste_id_db, content, expires_at, views_left, language = paste
 
     if expires_at and datetime.utcnow() > expires_at:
-        cursor.execute("DELETE FROM pastes WHERE id = ?", paste_id_db)
-        conn_str.commit()
+        cursor.execute("DELETE FROM pastes WHERE id = %s", (paste_id_db,))
+        conn.commit()
         return "This paste has expired or been deleted.", 410
 
     if views_left is not None and views_left <= 0:
-        cursor.execute("DELETE FROM pastes WHERE id = ?", paste_id_db)
-        conn_str.commit()
+        cursor.execute("DELETE FROM pastes WHERE id = %s", (paste_id_db,))
+        conn.commit()
         return "This paste has expired or been deleted.", 410
 
-    cursor.execute("SELECT id, email, email_hash, verified FROM paste_viewers WHERE paste_id = ?", paste_id)
+    cursor.execute("SELECT id, email, email_hash, verified FROM paste_viewers WHERE paste_id = %s", (paste_id,))
     viewers = cursor.fetchall()
     verified_emails = session.get(f"verified_{paste_id}", [])
 
@@ -201,18 +197,18 @@ def view_paste(paste_id):
             submitted_email = request.form.get("email", "").strip().lower()
             email_hash_val = hash_email(submitted_email)
 
-            viewer = next((v for v in viewers if v.email_hash == email_hash_val), None)
+            viewer = next((v for v in viewers if v[2] == email_hash_val), None)
             if not viewer:
                 return render_template("auth.html", paste_id=paste_id, error="Email not authorized.")
 
-            viewer_id = viewer.id
-            decrypted_email = fernet.decrypt(viewer.email.encode()).decode()
+            viewer_id = viewer[0]
+            decrypted_email = fernet.decrypt(viewer[1].encode()).decode()
             code = generate_code()
 
             cursor.execute("""
-                UPDATE paste_viewers SET access_code = ?, verified = FALSE WHERE id = ?
+                UPDATE paste_viewers SET access_code = %s, verified = FALSE WHERE id = %s
             """, (code, viewer_id))
-            conn_str.commit()
+            conn.commit()
 
             paste_url = request.host_url.rstrip("/") + f"/p/{paste_id}"
             send_email(decrypted_email, paste_url, code)
@@ -224,15 +220,15 @@ def view_paste(paste_id):
             code = request.form.get("code", "").strip()
             email_hash_val = hash_email(email)
 
-            cursor.execute("SELECT id, access_code FROM paste_viewers WHERE paste_id = ? AND email_hash = ?",
+            cursor.execute("SELECT id, access_code FROM paste_viewers WHERE paste_id = %s AND email_hash = %s",
                            (paste_id, email_hash_val))
             row = cursor.fetchone()
 
-            if not row or row.access_code != code:
+            if not row or row[1] != code:
                 return render_template("auth.html", paste_id=paste_id, email=email, error="Invalid code.")
 
-            cursor.execute("UPDATE paste_viewers SET verified = TRUE WHERE id = ?", row.id)
-            conn_str.commit()
+            cursor.execute("UPDATE paste_viewers SET verified = TRUE WHERE id = %s", (row[0],))
+            conn.commit()
             verified_emails.append(email)
             session[f"verified_{paste_id}"] = verified_emails
 
@@ -240,8 +236,8 @@ def view_paste(paste_id):
             return render_template("auth.html", paste_id=paste_id)
 
     if views_left is not None:
-        cursor.execute("UPDATE pastes SET views_left = views_left - 1 WHERE id = ?", paste_id_db)
-        conn_str.commit()
+        cursor.execute("UPDATE pastes SET views_left = views_left - 1 WHERE id = %s", (paste_id_db,))
+        conn.commit()
 
     try:
         lexer = get_lexer_by_name(language)
@@ -253,7 +249,7 @@ def view_paste(paste_id):
     highlighted = highlight(decrypted_content, lexer, formatter)
     style = formatter.get_style_defs('.codehilite')
 
-    conn_str.close()
+    conn.close()
 
     return render_template("home.html", paste={"highlighted": highlighted}, css=style)
 
