@@ -11,10 +11,22 @@ from pygments.lexers import get_lexer_by_name
 from pygments.formatters import HtmlFormatter
 import smtplib
 from email.mime.text import MIMEText
+from cryptography.fernet import Fernet
+import base64
+import hashlib
 
 load_dotenv()
 
+# Get key from .env and convert it to 32-byte base64
+raw_key = os.getenv("ENCRYPTION_KEY")
+key = base64.urlsafe_b64encode(hashlib.sha256(raw_key.encode()).digest())
+fernet = Fernet(key)
+
+def hash_email(email: str) -> str:
+    return hashlib.sha256(email.lower().encode()).hexdigest()
+
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY")
 
 # DB connection string
 conn_str = (
@@ -45,6 +57,7 @@ CREATE TABLE IF NOT EXISTS paste_viewers (
     id INT AUTO_INCREMENT PRIMARY KEY,
     paste_id VARCHAR(16),
     email VARCHAR(255),
+    email_hash VARCHAR(64),
     access_code VARCHAR(10),
     verified BOOLEAN DEFAULT FALSE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -91,7 +104,6 @@ Thanks!
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-
     conn = pyodbc.connect(conn_str, autocommit=True)
     cursor = conn.cursor()
 
@@ -112,37 +124,35 @@ def home():
         expires_at = datetime.utcnow() + timedelta(hours=expiry_hours)
         paste_id = uuid.uuid4().hex[:8]
 
+        encrypted_content = fernet.encrypt(text.encode()).decode()
+
         cursor.execute("""
             INSERT INTO pastes (paste_id, content, expires_at, views_left, language)
             VALUES (?, ?, ?, ?, ?)
-        """, (paste_id, text, expires_at, views_left, language))
+        """, (paste_id, encrypted_content, expires_at, views_left, language))
 
-        # Just save emails to DB, no emailing here
         emails_raw = request.form.get("emails", "").strip()
         emails = [e.strip() for e in emails_raw.split(",") if e.strip()]
         for email in emails:
+            email_hash = hash_email(email)
+            encrypted_email = fernet.encrypt(email.encode()).decode()
             cursor.execute("""
-                INSERT INTO paste_viewers (paste_id, email)
-                VALUES (?, ?)
-            """, (paste_id, email))
+                INSERT INTO paste_viewers (paste_id, email, email_hash)
+                VALUES (?, ?, ?)
+            """, (paste_id, encrypted_email, email_hash))
 
         conn.commit()
-
         paste_url = request.host_url.rstrip("/") + f"/p/{paste_id}"
         return render_template("home.html", paste_created=True, paste_url=paste_url)
-    
+
     conn.close()
-
     return render_template("home.html", paste=None)
-
 
 @app.route("/p/<paste_id>", methods=["GET", "POST"])
 def view_paste(paste_id):
-
     conn = pyodbc.connect(conn_str, autocommit=True)
     cursor = conn.cursor()
 
-    # Fetch paste details as before
     cursor.execute("SELECT id, content, expires_at, views_left, language FROM pastes WHERE paste_id = ?", paste_id)
     paste = cursor.fetchone()
     if not paste:
@@ -158,66 +168,64 @@ def view_paste(paste_id):
         cursor.execute("DELETE FROM pastes WHERE id = ?", paste_id_db)
         return "This paste has expired or been deleted.", 410
 
-    # Check restricted viewers
-    cursor.execute("SELECT email FROM paste_viewers WHERE paste_id = ?", paste_id)
-    allowed_emails = [row[0] for row in cursor.fetchall()]
+    cursor.execute("SELECT id, email, email_hash, verified FROM paste_viewers WHERE paste_id = ?", paste_id)
+    viewers = cursor.fetchall()
     verified_emails = session.get(f"verified_{paste_id}", [])
 
-    if allowed_emails:
-        # Step 1: User submits email to receive code (request new code)
+    if viewers:
         if request.method == "POST" and "request_code" in request.form:
-            email = request.form.get("email", "").strip()
-            if email not in allowed_emails:
+            submitted_email = request.form.get("email", "").strip().lower()
+            email_hash_val = hash_email(submitted_email)
+
+            viewer = next((v for v in viewers if v.email_hash == email_hash_val), None)
+            if not viewer:
                 return render_template("auth.html", paste_id=paste_id, error="Email not authorized.")
 
-            # Generate new code and save
+            viewer_id = viewer.id
+            decrypted_email = fernet.decrypt(viewer.email.encode()).decode()
             code = generate_code()
+
             cursor.execute("""
-                UPDATE paste_viewers SET access_code = ?, verified = FALSE WHERE paste_id = ? AND email = ?
-            """, (code, paste_id, email))
+                UPDATE paste_viewers SET access_code = ?, verified = FALSE WHERE id = ?
+            """, (code, viewer_id))
             conn.commit()
 
             paste_url = request.host_url.rstrip("/") + f"/p/{paste_id}"
-            send_email(email, paste_url, code)
+            send_email(decrypted_email, paste_url, code)
 
-            return render_template("auth.html", paste_id=paste_id, email=email, message="Access code sent to your email. Please enter it below.")
+            return render_template("auth.html", paste_id=paste_id, email=decrypted_email, message="Access code sent.")
 
-        # Step 2: User submits code to verify
         elif request.method == "POST" and "verify_code" in request.form:
-            email = request.form.get("email", "").strip()
+            email = request.form.get("email", "").strip().lower()
             code = request.form.get("code", "").strip()
+            email_hash_val = hash_email(email)
 
-            cursor.execute("""
-                SELECT id, access_code FROM paste_viewers WHERE paste_id = ? AND email = ?
-            """, (paste_id, email))
+            cursor.execute("SELECT id, access_code FROM paste_viewers WHERE paste_id = ? AND email_hash = ?",
+                           (paste_id, email_hash_val))
             row = cursor.fetchone()
 
-            if not row or row[1] != code:
-                return render_template("auth.html", paste_id=paste_id, email=email, error="Invalid code. Please try again.")
+            if not row or row.access_code != code:
+                return render_template("auth.html", paste_id=paste_id, email=email, error="Invalid code.")
 
-            # Mark verified in DB & session
-            cursor.execute("UPDATE paste_viewers SET verified = TRUE WHERE id = ?", row[0])
+            cursor.execute("UPDATE paste_viewers SET verified = TRUE WHERE id = ?", row.id)
             conn.commit()
-
             verified_emails.append(email)
             session[f"verified_{paste_id}"] = verified_emails
 
-        # If not verified, show email entry form (step 1)
         if not verified_emails:
             return render_template("auth.html", paste_id=paste_id)
 
-    # Decrement views only if limited
     if views_left is not None:
         cursor.execute("UPDATE pastes SET views_left = views_left - 1 WHERE id = ?", paste_id_db)
 
-    # Show highlighted paste
     try:
         lexer = get_lexer_by_name(language)
     except Exception:
         lexer = get_lexer_by_name("text")
 
     formatter = HtmlFormatter(linenos=True, cssclass="codehilite")
-    highlighted = highlight(content, lexer, formatter)
+    decrypted_content = fernet.decrypt(content.encode()).decode()
+    highlighted = highlight(decrypted_content, lexer, formatter)
     style = formatter.get_style_defs('.codehilite')
 
     conn.close()
