@@ -5,7 +5,10 @@ import string
 from datetime import datetime, timedelta
 from flask import Flask, request, render_template, redirect, session, flash
 from dotenv import load_dotenv
-import pyodbc
+
+import mysql.connector
+from mysql.connector import errorcode
+
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import HtmlFormatter
@@ -29,15 +32,15 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY")
 
 # DB connection string
-conn_str = (
-    f"DRIVER={os.getenv('DB_DRIVER')};"
-    f"SERVER={os.getenv('DB_SERVER')}:{os.getenv('DB_PORT')};"
-    f"DATABASE={os.getenv('DB_NAME')};"
-    f"UID={os.getenv('DB_USER')};"
-    f"PWD={os.getenv('DB_PASSWORD')};"
+conn_str = mysql.connector.connect(
+    host=os.getenv("DB_SERVER"),
+    port=int(os.getenv("DB_PORT")),
+    database=os.getenv("DB_NAME"),
+    user=os.getenv("DB_USER"),
+    password=os.getenv("DB_PASSWORD")
 )
-conn = pyodbc.connect(conn_str, autocommit=True)
-cursor = conn.cursor()
+
+cursor = conn_str.cursor()
 
 # Create tables if not exist
 cursor.execute("""
@@ -52,6 +55,8 @@ CREATE TABLE IF NOT EXISTS pastes (
 );
 """)
 
+conn_str.commit()
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS paste_viewers (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -64,6 +69,7 @@ CREATE TABLE IF NOT EXISTS paste_viewers (
     FOREIGN KEY (paste_id) REFERENCES pastes(paste_id) ON DELETE CASCADE
 );
 """)
+conn_str.commit()
 
 def generate_code(length=6):
     return ''.join(random.choices(string.digits, k=length))
@@ -104,8 +110,15 @@ Thanks!
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-    conn = pyodbc.connect(conn_str, autocommit=True)
-    cursor = conn.cursor()
+    conn_str = mysql.connector.connect(
+        host=os.getenv("DB_SERVER"),
+        port=int(os.getenv("DB_PORT")),
+        database=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD")
+    )
+
+    cursor = conn_str.cursor()
 
     if request.method == "POST":
         text = request.form["paste"]
@@ -130,6 +143,7 @@ def home():
             INSERT INTO pastes (paste_id, content, expires_at, views_left, language)
             VALUES (?, ?, ?, ?, ?)
         """, (paste_id, encrypted_content, expires_at, views_left, language))
+        conn_str.commit()
 
         emails_raw = request.form.get("emails", "").strip()
         emails = [e.strip() for e in emails_raw.split(",") if e.strip()]
@@ -140,18 +154,26 @@ def home():
                 INSERT INTO paste_viewers (paste_id, email, email_hash)
                 VALUES (?, ?, ?)
             """, (paste_id, encrypted_email, email_hash))
+            conn_str.commit()
 
-        conn.commit()
+        cursor.close()
         paste_url = request.host_url.rstrip("/") + f"/p/{paste_id}"
         return render_template("home.html", paste_created=True, paste_url=paste_url)
 
-    conn.close()
+    cursor.close()
     return render_template("home.html", paste=None)
 
 @app.route("/p/<paste_id>", methods=["GET", "POST"])
 def view_paste(paste_id):
-    conn = pyodbc.connect(conn_str, autocommit=True)
-    cursor = conn.cursor()
+    conn_str = mysql.connector.connect(
+        host=os.getenv("DB_SERVER"),
+        port=int(os.getenv("DB_PORT")),
+        database=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD")
+    )
+
+    cursor = conn_str.cursor()
 
     cursor.execute("SELECT id, content, expires_at, views_left, language FROM pastes WHERE paste_id = ?", paste_id)
     paste = cursor.fetchone()
@@ -162,10 +184,12 @@ def view_paste(paste_id):
 
     if expires_at and datetime.utcnow() > expires_at:
         cursor.execute("DELETE FROM pastes WHERE id = ?", paste_id_db)
+        conn_str.commit()
         return "This paste has expired or been deleted.", 410
 
     if views_left is not None and views_left <= 0:
         cursor.execute("DELETE FROM pastes WHERE id = ?", paste_id_db)
+        conn_str.commit()
         return "This paste has expired or been deleted.", 410
 
     cursor.execute("SELECT id, email, email_hash, verified FROM paste_viewers WHERE paste_id = ?", paste_id)
@@ -188,7 +212,7 @@ def view_paste(paste_id):
             cursor.execute("""
                 UPDATE paste_viewers SET access_code = ?, verified = FALSE WHERE id = ?
             """, (code, viewer_id))
-            conn.commit()
+            conn_str.commit()
 
             paste_url = request.host_url.rstrip("/") + f"/p/{paste_id}"
             send_email(decrypted_email, paste_url, code)
@@ -208,7 +232,7 @@ def view_paste(paste_id):
                 return render_template("auth.html", paste_id=paste_id, email=email, error="Invalid code.")
 
             cursor.execute("UPDATE paste_viewers SET verified = TRUE WHERE id = ?", row.id)
-            conn.commit()
+            conn_str.commit()
             verified_emails.append(email)
             session[f"verified_{paste_id}"] = verified_emails
 
@@ -217,6 +241,7 @@ def view_paste(paste_id):
 
     if views_left is not None:
         cursor.execute("UPDATE pastes SET views_left = views_left - 1 WHERE id = ?", paste_id_db)
+        conn_str.commit()
 
     try:
         lexer = get_lexer_by_name(language)
@@ -228,7 +253,7 @@ def view_paste(paste_id):
     highlighted = highlight(decrypted_content, lexer, formatter)
     style = formatter.get_style_defs('.codehilite')
 
-    conn.close()
+    conn_str.close()
 
     return render_template("home.html", paste={"highlighted": highlighted}, css=style)
 
