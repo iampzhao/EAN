@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PasteBin Self-Destruct</title>
+    {% if css %}
+    <style>{{ css|safe }}</style>
+    {% endif %}
+</head>
+<body>
+    <h1>ChromeTech EAN</h1>
+
+    {% if paste %}
+        <div class="codehilite">
+            {{ paste.highlighted|safe }}
+        </div>
+        <br>
+        <a href="/">Create Another Paste</a>
+
+    {% elif paste_created %}
+        <p><strong>Paste created!</strong></p>
+        <p>Link: <a href="{{ paste_url }}">{{ paste_url }}</a></p>
+        <br>
+        <a href="/">Create Another Paste</a>
+
+    {% else %}
+        <form method="post">
+            <textarea name="paste" rows="10" cols="70" required></textarea><br>
+
+            <label for="language">Language:</label>
+            <select name="language">
+                <option value="text">Plain Text</option>
+                <option value="python">Python</option>
+                <option value="javascript">JavaScript</option>
+                <option value="html">HTML</option>
+                <option value="bash">Bash</option>
+                <option value="sql">SQL</option>
+                <option value="c">C</option>
+                <option value="cpp">C++</option>
+                <option value="java">Java</option>
+                <option value="json">JSON</option>
+            </select><br><br>
+
+            <label for="expiry_days">Expire after (hours, between 1 and 720):</label>
+            <input type="number" name="expiry_hours" min="1" max="720" value="1" required><br><br>
+
+            <label for="views_left">Max Views (optional):</label>
+            <input type="number" name="views_left" min="1" placeholder="Leave empty for unlimited"><br><br>
+
+            <label for="emails">Restrict access to these emails (optional, comma separated):</label><br>
+            <textarea name="emails" rows="2" cols="70" placeholder="email1@example.com, email2@example.com"></textarea><br><br>
+
+            <button type="submit">Create Paste</button>
+        </form>
+    {% endif %}
+</body>
+</html>

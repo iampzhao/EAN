@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Authenticate to View Paste</title>
+</head>
+<body>
+    <h2>Restricted Paste - Authentication Required</h2>
+
+    {% if error %}
+        <p style="color:red;">{{ error }}</p>
+    {% endif %}
+    {% if message %}
+        <p style="color:green;">{{ message }}</p>
+    {% endif %}
+
+    {% if not email %}
+    <!-- Step 1: Enter email to request code -->
+    <form method="post">
+        <label>Email:</label><br>
+        <input name="email" type="email" required><br><br>
+        <button type="submit" name="request_code">Request Access Code</button>
+    </form>
+    {% else %}
+    <!-- Step 2: Enter received code -->
+    <form method="post">
+        <input type="hidden" name="email" value="{{ email }}">
+        <label>Access Code (sent to {{ email }}):</label><br>
+        <input name="code" type="text" required><br><br>
+        <button type="submit" name="verify_code">Verify Code</button>
+    </form>
+    {% endif %}
+</body>
+</html>
