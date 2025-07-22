@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pastebin Service</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    {% if highlight_css %}
+    <style>
+        {{ highlight_css|safe }}
+    </style>
+    {% endif %}
+</head>
+<body>
+    <h1>Pastebin Service</h1>
+    {% if paste_url %}
+        <p>Your paste URL: <a href="{{ paste_url }}">{{ paste_url }}</a></p>
+    {% endif %}
+    {% if paste_content %}
+        <div class="highlight">
+            {{ paste_content|safe }}
+        </div>
+    {% endif %}
+    <form method="post">
+        <textarea name="content" rows="10" cols="50" placeholder="Paste your text here..."></textarea><br>
+        <select name="language">
+            {% for code, name in languages %}
+                <option value="{{ code }}">{{ name }}</option>
+            {% endfor %}
+        </select><br>
+        <button type="submit">Submit</button>
+    </form>
+</body>
+</html>
